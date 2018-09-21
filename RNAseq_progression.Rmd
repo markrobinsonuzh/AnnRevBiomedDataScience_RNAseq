@@ -1,0 +1,338 @@
+---
+title: 'AnnRevBiomedDataScience-RNA-seq: progression of RNA-seq'
+author: "Katharina Hembach"
+date: "9/21/2018"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## SRA projects from recount and the develpment of read length and dept over the years
+
+We extract metadata from SRA using the bioconductor package [recount](http://bioconductor.org/packages/release/bioc/html/recount.html).
+
+```{r, warning=FALSE}
+suppressMessages(library(recount))
+suppressMessages(library(ggplot2))
+suppressMessages(library(dplyr))
+suppressMessages(library(ggridges))
+suppressMessages(library(cowplot))
+
+plotdir <- "./"
+## Download all metadate from SRA in the recount project
+metadat <- all_metadata(subset = "sra", verbose = TRUE)
+
+dat <- data.frame(project = metadat$project, 
+                  read_count = metadat$read_count_as_reported_by_sra, 
+                  paired_end = metadat$paired_end,
+                  read_length = metadat$avg_read_length,
+                  publication_date = as.Date(metadat$biosample_publication_date),
+                  misreported_paired_end=metadat$sra_misreported_paired_end)
+dat <- dat[!is.na(dat$publication_date),]
+
+##################
+## Preprocessing #
+##################
+## There are projects with both single-end and paired-end samples:
+dat %>% dplyr::group_by(project) %>% 
+  dplyr::summarise(n_library_types=length(table(paired_end))) %>% 
+  dplyr::group_by(n_library_types) %>% 
+  dplyr::summarize(project_count=n())
+
+## Some projects have samples with different read lengths:
+dat %>% dplyr::group_by(project) %>% 
+  dplyr::summarize(n_read_length = dplyr::n_distinct(read_length)) %>% 
+  dplyr::count(n_read_length!=1)
+
+## We only keep the projects where SRA did not misreport paired-end, 
+## where the project has a single library type and 
+## where all samples have the same publication date 
+projects_keep <- dat %>% 
+  dplyr::group_by(project) %>% 
+  dplyr::summarize(sum_misreported_paired_end=sum(misreported_paired_end), 
+            n_library_types=dplyr::n_distinct(paired_end),
+            n_pub_dates=dplyr::n_distinct(publication_date)) %>%
+  dplyr::filter(sum_misreported_paired_end==0 & n_library_types==1 & n_pub_dates==1) %>% 
+  dplyr::pull(project)
+dat <- dat[dat$project %in% projects_keep,]
+
+## We divide the read length of  paired-end sample by 2, because we want to show how the length of a single read developed over time
+## Recount article: https://f1000research.com/articles/6-1558/v1
+## quote: "average read length (times 2 for paired-end samples)" --> paired-end samples have at least double the size of single-end projects
+dat <- dat %>% dplyr::mutate(read_length_single=read_length/(paired_end+1))
+
+## We compute the median read length and median number of reads of all samples per project.
+## We discard all project that were published before 2008 (first RNA-seq paper is from 2008).
+dat_median <- dat %>% 
+  dplyr::group_by(project) %>% 
+  dplyr::summarize(median_read_count = median(read_count),
+            median_read_length = median(read_length), 
+            median_read_length_single = median(read_length_single),
+            publication_date = unique(publication_date), 
+            paired_end = unique(paired_end)) %>%
+  dplyr::filter(median_read_count>0 & median_read_length>0 & publication_date>as.Date("2008-01-01") )
+
+################
+## Ridge plots #
+################
+## median read length
+legend_label <- c(paste0("single-end (", sum(dat_median$paired_end), ")"), 
+                  paste0("paired-end (", sum(dat_median$paired_end==FALSE), ")"))
+
+p1 <- ggplot(dat_median, aes(y=format(publication_date, format="%Y"), x=median_read_length, fill=paired_end)) +
+   stat_density_ridges(aes(scale=0.9,  point_color=paired_end, point_alpha=0.5), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       jittered_points = TRUE, alpha=0.4, point_size=0.6,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text = element_text(size=20)) +
+  labs(y="year of publication", x="median read length") +
+  scale_x_continuous(expand = c(0.01, 0) ) + 
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+p1
+
+### median read length of single reads
+p1b <- ggplot(dat_median, aes(y=format(publication_date, format="%Y"), x=median_read_length_single, fill=paired_end)) +
+   stat_density_ridges(aes(scale=0.95,  point_color=paired_end, point_alpha=0.5), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       jittered_points = TRUE, alpha=0.4, point_size=0.6,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text = element_text(size=20)) +
+  labs(y="year of publication", x="median read length")+
+  scale_x_continuous(limits = c(10, 160), breaks=c(25, 50, 75, 100, 125, 150), expand = c(0.01, 0) ) + 
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+p1b
+
+## median read length and the publication month
+p2 <- ggplot(dat_median, aes(y=cut(publication_date, breaks = "month"), x=median_read_length, fill=paired_end)) +
+   ggridges::stat_density_ridges(aes(scale=3), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       alpha=0.3,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text=element_text(size=20), axis.text.y=element_text(angle=45, hjust=1, size=15),
+        axis.text.x=element_text(size=15)) +
+  labs(y="year of publication", x="median read length") +
+  scale_x_continuous(limits=c(0, NA), expand=c(0.01, 0)) +
+  scale_y_discrete(drop=FALSE, 
+                   breaks=paste0(unique(as.character(dat_median$publication_date, "%Y")),
+                                 "-01-01"), 
+                   expand=c(0.01, 0)) +
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+ p2 
+           
+## median number of reads per year
+p3 <- ggplot(dat_median, aes(y=format(publication_date, format="%Y"), x=median_read_count, fill=paired_end)) +
+   stat_density_ridges(aes(scale=0.95,  point_color=paired_end, point_alpha=0.5), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       jittered_points = TRUE, alpha=0.4, point_size=0.6,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text = element_text(size=20)) +
+  labs(y="year of publication", x="median number of reads") +
+  scale_x_log10(limits=c(1e+06, 1e+09), expand = c(0.01, 0))+
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+p3
+
+## per month
+p4 <- ggplot(dat_median, aes(y=cut(publication_date, breaks = "month"), x=median_read_count, fill=paired_end)) +
+   ggridges::stat_density_ridges(aes(scale=2), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       alpha=0.3,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text=element_text(size=20), axis.text.y=element_text(angle=45, hjust=1, size=15),
+        axis.text.x=element_text(size=15)) +
+  labs(y="year of publication", x="median number of reads") +
+  scale_x_continuous(limits=c(0, 5e+08), expand=c(0.01, 0)) +
+  scale_y_discrete(drop=FALSE, 
+                   breaks=paste0(unique(as.character(dat_median$publication_date, "%Y")),
+                                 "-01-01"), 
+                   expand=c(0.01, 0)) +
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+ p4 
+
+##############
+## grid plot #
+##############
+## Grid plot with a single legend
+legend_b <- get_legend(p1 + theme(legend.position="bottom"))
+
+prow <- plot_grid(p1 + theme(legend.position="none"), 
+                  p3 + theme(legend.position="none", axis.title.y=element_blank()), 
+                  labels = c("A", "B"), 
+                  vjust = 1.1, 
+                  hjust= 0, 
+                  nrow = 1)
+pg <- plot_grid( prow, legend_b, ncol = 1, rel_heights = c(1, .1))
+pg
+
+## read length of single reads
+legend_b <- get_legend(p1b + theme(legend.position="bottom"))
+prow <- plot_grid(p1b + theme(legend.position="none"), 
+                  p3 + theme(legend.position="none", axis.title.y=element_blank()), 
+                  labels = c("A", "B"), 
+                  vjust = 1.1, 
+                  hjust= 0, 
+                  nrow = 1)
+pg <- plot_grid( prow, legend_b, ncol = 1, rel_heights = c(1, .1))
+pg
+
+## year and month
+legend_b <- get_legend(p2 + theme(legend.position="bottom"))
+
+prow <- plot_grid(p2 + theme(legend.position="none"), 
+                  p4 + theme(legend.position="none", axis.title.y=element_blank()), 
+                  labels = c("A", "B"), 
+                  vjust = 1.1, 
+                  hjust= 0, 
+                  nrow = 1)
+pg <- plot_grid( prow, legend_b, ncol = 1, rel_heights = c(1, .1))
+pg
+```
+
+Apparently, the publication dates are wrong:
+```{r}
+metadat$biosample_publication_date[metadat$experiment=="SRX261173"]
+metadat$biosample_submission_date[metadat$experiment=="SRX261173"]
+metadat$biosample_update_date[metadat$experiment=="SRX261173"]
+```
+The publication date is before the submission date...
+
+### Using sumission dates
+
+So instead, we will use the submission dates.
+
+```{r, warning=FALSE}
+dat1 <- data.frame(project = metadat$project, 
+                  read_count = metadat$read_count_as_reported_by_sra, 
+                  paired_end = metadat$paired_end,
+                  read_length = metadat$avg_read_length,
+                  submission_date=as.Date(metadat$biosample_submission_date),
+                  misreported_paired_end=metadat$sra_misreported_paired_end)
+dat1 <- dat1[!is.na(dat1$submission_date),]
+
+##################
+## Preprocessing #
+##################
+## We only keep the projects where SRA did not misreport paired-end, 
+## where the project has a single library type and 
+## where all samples have the same submission date 
+projects_keep <- dat1 %>% 
+  dplyr::group_by(project) %>% 
+  dplyr::summarize(sum_misreported_paired_end=sum(misreported_paired_end), 
+            n_library_types=dplyr::n_distinct(paired_end),
+            n_subm_dates=dplyr::n_distinct(submission_date)) %>%
+  dplyr::filter(sum_misreported_paired_end==0 & n_library_types==1 & n_subm_dates==1) %>% 
+  dplyr::pull(project)
+dat1 <- dat1[dat1$project %in% projects_keep,]
+## Divide the read length for the paired-end samples by 2
+dat1 <- dat1 %>% dplyr::mutate(read_length_single=read_length/(paired_end+1))
+
+## We compute the median read length and median number of reads of all samples per project 
+dat1_median <- dat1 %>% 
+  dplyr::group_by(project) %>% 
+  dplyr::summarize(median_read_count = median(read_count),
+            median_read_length = median(read_length), 
+            median_read_length_single = median(read_length_single),
+            submission_date = unique(submission_date), 
+            paired_end = unique(paired_end),
+            number_samples=n()) %>%
+  dplyr::filter(median_read_count>0 & median_read_length>0 )
+
+################
+## Ridge plots #
+################
+### median read length of single reads
+legend_label <- c(paste0("single-end (", sum(dat1_median$paired_end), ")"), 
+                  paste0("paired-end (", sum(dat1_median$paired_end==FALSE), ")"))
+p1b <- ggplot(dat1_median, aes(y=format(submission_date, format="%Y"), x=median_read_length_single, fill=paired_end)) +
+   stat_density_ridges(aes(scale=0.95,  point_color=paired_end, point_alpha=0.5), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       jittered_points = TRUE, alpha=0.4, point_size=0.6,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text = element_text(size=20)) +
+  labs(y="year of submission", x="median read length")+
+  scale_x_continuous(limits = c(10, 170), breaks=c(25, 50, 75, 100, 125, 150), expand = c(0.01, 0) ) + 
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+p1b
+
+## median number of reads per year
+p3 <- ggplot(dat1_median, aes(y=format(submission_date, format="%Y"), x=median_read_count, fill=paired_end)) +
+   stat_density_ridges(aes(scale=0.95,  point_color=paired_end, point_alpha=0.5), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       jittered_points = TRUE, alpha=0.4, point_size=0.6,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text = element_text(size=20)) +
+  labs(y="year of publication", x="median number of reads") +
+  scale_x_log10(limits=c(1e+06, 1e+09), expand = c(0.01, 0))+
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+p3
+
+### Number of studies per sample
+p5 <- ggplot(dat1_median, aes(y=format(submission_date, format="%Y"), x=number_samples, fill=paired_end)) +
+   stat_density_ridges(aes(scale=0.95,  point_color=paired_end, point_alpha=0.5), 
+                       quantile_lines=TRUE, quantiles=2, position="points_sina", 
+                       jittered_points = TRUE, alpha=0.4, point_size=0.6,
+                       rel_min_height=0.01) +
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(text = element_text(size=20)) +
+  labs(y="year of submission", x="number of samples") + 
+  scale_x_log10(limits=c(1,1000) ,expand = c(0.01, 0))+
+  scale_fill_discrete(name="library type", labels=legend_label) +
+  scale_point_color_discrete(name="library type", labels=legend_label)
+p5
+
+##############
+## grid plot #
+##############
+## using read length of single reads
+legend_b <- get_legend(p1b + theme(legend.position="bottom"))
+prow <- plot_grid(p1b + theme(legend.position="none"), 
+                  p3 + theme(legend.position="none", axis.title.y=element_blank()), 
+                  labels = c("A", "B"), 
+                  vjust = 1.1, 
+                  hjust= 0, 
+                  nrow = 1)
+pg <- plot_grid( prow, legend_b, ncol = 1, rel_heights = c(1, .1))
+pg
+ggsave(filename = file.path(plotdir, "ridge_plot_submission_year_single.png"), plot = pg, 
+       width=8, height=6)   
+
+## Also plot the number of samples per study.
+legend <- get_legend(p1b)
+# align all plots vertically
+plots <- align_plots(p1b + theme(legend.position="none", axis.title.y=element_blank()), 
+                     p3 + theme(legend.position="none", axis.title.y=element_blank()), 
+                     p5 + theme(legend.position="none", axis.title.y=element_blank()), 
+                     align = 'v', 
+                     axis = 'l')
+top_row <- plot_grid(plots[[1]], plots[[2]], 
+                     labels = c("A", "B"), 
+                     rel_widths = c(1,1), 
+                     nrow = 1)
+bottom_row <- plot_grid(plots[[3]], legend, 
+                        labels = c("C", ""), 
+                        rel_widths = c(1,1), 
+                        nrow = 1)
+pg2<- plot_grid(top_row, bottom_row, ncol = 1)
+pg2
+```
+
+
+```{r}
+sessionInfo()
+```
