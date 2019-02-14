@@ -2,8 +2,9 @@
 library(recount)
 library(reshape2)
 library(ggplot2)
+library(dplyr)
 
-?recount::download_study
+# ?recount::download_study
 
 # url <- download_study('ERP001942', download = FALSE)
 
@@ -30,4 +31,4 @@ p <- ggplot(m, aes(x=top_genes, y=x, group=sample)) +
   ylab("Proportion of Reads") + xlim(c(0,.5)) + theme_bw()
 p
 
-ggsave("fig3_read_expenditure.png", p, width=5.5, height=5)
+ggsave("Figure3_read_expenditure.pdf", p, width=5.5, height=5)
